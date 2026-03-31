@@ -1,3 +1,19 @@
+"""
+Main training script for the class-project 2v2 football setup.
+
+This file couples together:
+- Unity environment bootstrap
+- observation stitching
+- model creation and checkpoint loading
+- PPO-style training
+- a rough post-training evaluation loop
+
+Naming note:
+- `g_brain_name` and `b_brain_name` are legacy names for the two Unity
+  behaviors exposed by the environment.
+- In practice, this script treats those behaviors as the two teams.
+- Goalie versus striker is decided by row index within each behavior.
+"""
 
 from mlagents_envs.environment import UnityEnvironment
 import numpy as np
@@ -17,26 +33,24 @@ from time import perf_counter
 
 DEVICE = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
-# environment configuration
+# ---------------------------------------------------------------------------
+# Environment bootstrap and behavior discovery
+# ---------------------------------------------------------------------------
+
 env = UnityEnvironment(file_name="CoE202")
 
-# print the brain names
-#
+# The Unity build exposes two behaviors. The original variable names refer to
+# "brains", but operationally this script uses them as the two teams.
 env_info = env.reset()
-# set the goalie brain
 g_brain_name =list(env.behavior_specs)[0]
 g_brain =list(env.behavior_specs)[0]
 print(list(env.behavior_specs)[1])
-# set the striker brain
 b_brain_name = list(env.behavior_specs)[1]
 
 b_brain =list(env.behavior_specs)[1]
 
 
-# reset the environment
-
-
-# number of agents 
+# Each team behavior is assumed to contain two controlled players.
 n_goalie_agents = 2
 #len(env_info[g_brain_name].agents)
 print('Number of goalie agents:', n_goalie_agents)
@@ -52,13 +66,22 @@ striker_action_size = 3
 # s_brain.vector_action_space_size
 print('Number of striker actions:', striker_action_size)
 
-# examine the state space
+# ---------------------------------------------------------------------------
+# State extraction
+# ---------------------------------------------------------------------------
+#
+# Each Unity behavior returns two observation tensors per player. The script
+# concatenates those two tensors to form one flat state per player, then
+# stacks players by role: both goalies together and both strikers together.
+
 decision_steps_p, terminal_steps_p = env.get_steps(g_brain_name)
 decision_steps_b, terminal_steps_b = env.get_steps(b_brain_name)
 
+# Team 0 goalie / team 1 goalie
 cur_obs_g1 = np.transpose(np.concatenate((decision_steps_p.obs[0][0,:], decision_steps_p.obs[1][0,:])))
 cur_obs_g2 = np.transpose(np.concatenate((decision_steps_b.obs[0][0,:], decision_steps_b.obs[1][0,:])))
 cur_obs_g= np.vstack((cur_obs_g1, cur_obs_g2))
+# Team 0 striker / team 1 striker
 cur_obs_s1 =  np.transpose(np.concatenate((decision_steps_p.obs[0][1,:], decision_steps_p.obs[1][1,:]) ))
 cur_obs_s2 =  np.transpose(np.concatenate((decision_steps_b.obs[0][1,:], decision_steps_b.obs[1][1,:]) ))
 cur_obs_s=np.vstack((cur_obs_s1, cur_obs_s2))
@@ -75,7 +98,10 @@ striker_state_size = striker_states.shape[1]
 print('There are {} striker agents. Each receives a state with length: {}'.format(striker_states.shape[0], striker_state_size))
 
 
-# hyperparameters
+# ---------------------------------------------------------------------------
+# Hyperparameters and checkpoint paths
+# ---------------------------------------------------------------------------
+
 N_STEP = 8
 BATCH_SIZE = 32
 GAMMA = 0.995
@@ -97,7 +123,13 @@ STRIKER_0_KEY = 0
 GOALIE_1_KEY = 1
 STRIKER_1_KEY = 1
 
-# NEURAL MODEL
+# ---------------------------------------------------------------------------
+# Neural models
+# ---------------------------------------------------------------------------
+#
+# Actors consume role-local state only. Critics consume the concatenated
+# global state of all four players.
+
 goalie_actor_model = ActorModel( goalie_state_size, goalie_action_size ).to(DEVICE)
 goalie_critic_model = CriticModel( goalie_state_size + striker_state_size + goalie_state_size + striker_state_size ).to(DEVICE)
 goalie_optim = optim.Adam( list( goalie_actor_model.parameters() ) + list( goalie_critic_model.parameters() ), lr=GOALIE_LR )
@@ -115,7 +147,10 @@ striker_actor_model.load( CHECKPOINT_STRIKER_ACTOR )
 striker_critic_model.load( CHECKPOINT_STRIKER_CRITIC )
 
 
-# AGENTS
+# ---------------------------------------------------------------------------
+# Agent and optimizer wrappers
+# ---------------------------------------------------------------------------
+
 goalie_0 = Agent( DEVICE, GOALIE_0_KEY, goalie_actor_model, N_STEP )
 goalie_optimizer = Optimizer( DEVICE, goalie_actor_model, goalie_critic_model, goalie_optim,  
     N_STEP, BATCH_SIZE, GAMMA, EPSILON, ENTROPY_WEIGHT, GRADIENT_CLIP)
@@ -125,6 +160,7 @@ striker_optimizer = Optimizer( DEVICE, striker_actor_model, striker_critic_model
     N_STEP, BATCH_SIZE, GAMMA, EPSILON, ENTROPY_WEIGHT, GRADIENT_CLIP)
 
 def ppo_train():
+    """Train the shared goalie and striker policies against a random opponent."""
     n_episodes = 5000
     team_0_window_score = deque(maxlen=100)
     team_0_window_score_wins = deque(maxlen=100)
@@ -135,6 +171,7 @@ def ppo_train():
     draws = deque(maxlen=100)
 
     for episode in range(n_episodes):
+        # Reset the environment and rebuild the four player states.
         env_info = env.reset()                        # reset the environment    
         decision_steps_p, terminal_steps_p = env.get_steps(g_brain_name)
         decision_steps_b, terminal_steps_b = env.get_steps(b_brain_name)
@@ -156,7 +193,7 @@ def ppo_train():
         t0 = perf_counter()
         print("t0, for loop = ", t0)
         while True:       
-            # select actions and send to environment
+            # Team 0 is controlled by the learned goalie/striker policies.
             t1 = perf_counter() - t0
             print("t1 = ", t1)
             
@@ -173,7 +210,8 @@ def ppo_train():
             if tracked_agent == -1 and  len(decision_steps_b) >= 1:
                 tracked_agent = decision_steps_b.agent_id[0]
 
-            # random            
+            # Team 1 is driven by random actions. TensorFlow is only used for
+            # this random-opponent action generation path.
             action_goalie_1 = np.asarray( tf.random.uniform(shape=[3], minval=-1, maxval=2, dtype=tf.int64) )
             action_striker_1 = np.asarray(  tf.random.uniform(shape=[3], minval=-1, maxval=2, dtype=tf.int64) )
             print(action_goalie_0)
@@ -187,8 +225,9 @@ def ppo_train():
 
 
             env.step()
-            #env_info = env.step(actions)                                                
-            # get next states
+            #env_info = env.step(actions)
+
+            # Pull the next observations and rewards out of Unity.
             decision_steps_p, terminal_steps_p = env.get_steps(g_brain_name)
             decision_steps_b, terminal_steps_b = env.get_steps(b_brain_name)
             #print(tracked_agent)
@@ -201,7 +240,8 @@ def ppo_train():
 
             
             
-            # get reward and update scores
+            # Reward bookkeeping is split back into per-role arrays so the
+            # learned goalie and striker can store their own trajectories.
             goalie_0_reward=decision_steps_p.reward[0]
             goalie_1_reward=decision_steps_b.reward[0]
             striker_0_reward=decision_steps_p.reward[1]
@@ -216,6 +256,8 @@ def ppo_train():
                 goalies_scores += goalies_rewards
                 strikers_scores += strikers_rewards
             else:
+                # Legacy anti-stalling reward shaping: if observations appear
+                # unchanged after a long span, apply a small penalty.
                 cur_obs_g1_new = np.transpose(np.concatenate((decision_steps_p.obs[0][0,:], decision_steps_p.obs[1][0,:])))
                 cur_obs_g2_new= np.transpose(np.concatenate((decision_steps_b.obs[0][0,:], decision_steps_b.obs[1][0,:])))
                 
@@ -245,7 +287,8 @@ def ppo_train():
 
             # exit loop if episode finished
              
-            # store experiences
+            # Store one experience for the learned goalie. The critic gets the
+            # concatenated global state of all four players.
             goalie_0_reward = goalies_rewards[goalie_0.KEY]
             goalie_0.step( 
                 goalies_states[goalie_0.KEY],
@@ -263,6 +306,7 @@ def ppo_train():
             )
 
 
+            # Store the matching striker experience with its own critic state.
             striker_0_reward = strikers_rewards[striker_0.KEY]
             striker_0.step(                 
                 strikers_states[striker_0.KEY],
@@ -300,7 +344,7 @@ def ppo_train():
 
             steps += 1
 
-        # learn
+        # PPO-style role-specific updates, followed by checkpoint writes.
         goalie_loss = goalie_optimizer.learn(goalie_0.memory)
         striker_loss = striker_optimizer.learn(striker_0.memory)        
 
@@ -331,7 +375,14 @@ def ppo_train():
 # train the agent
 ppo_train()
 
-# test the trained agents
+# ---------------------------------------------------------------------------
+# Post-training evaluation loop
+# ---------------------------------------------------------------------------
+#
+# The original project kept a second loop here for ad hoc evaluation. It
+# mirrors the state extraction/action path from training, but does not update
+# memory or weights.
+
 team_0_window_score = deque(maxlen=100)
 team_0_window_score_wins = deque(maxlen=100)
 
@@ -345,6 +396,7 @@ for episode in range(50):                                               # play g
     decision_steps_p, terminal_steps_p = env.get_steps(g_brain_name)
     decision_steps_b, terminal_steps_b = env.get_steps(b_brain_name)
 
+    # Rebuild the four role-specific states exactly as in training.
     cur_obs_g1 = np.transpose(np.concatenate((decision_steps_p.obs[0][0,:], decision_steps_p.obs[1][0,:])))
     cur_obs_g2 = np.transpose(np.concatenate((decision_steps_b.obs[0][0,:], decision_steps_b.obs[1][0,:])))
     cur_obs_g= np.vstack((cur_obs_g1, cur_obs_g2))
@@ -359,7 +411,7 @@ for episode in range(50):                                               # play g
     steps = 0
 
     while True:
-        # select actions and send to environment
+        # During evaluation, both teams use the learned role-shared policies.
         action_goalie_0 = goalie_0.act( goalies_states[0] )
         action_striker_0 = striker_0.act( strikers_states[0] )
 
@@ -391,10 +443,10 @@ for episode in range(50):                                               # play g
         #actions = dict( zip( [g_brain_name, b_brain_name], [actions_goalies, actions_strikers] ) )
 
 
-    
+
         env.step()
       
-        # get next states
+        # Read next observations and rewards from Unity.
         decision_steps_p, terminal_steps_p = env.get_steps(g_brain_name)
         decision_steps_b, terminal_steps_b = env.get_steps(b_brain_name)
 
@@ -419,13 +471,8 @@ for episode in range(50):                                               # play g
         goalies_scores += goalies_rewards
         strikers_scores += strikers_rewards
                     
-        # check if episode finished
-        
-
-        # exit loop if episode finished
-        
-
-        # roll over states to next time step
+        # Roll over states to the next step. This section appears experimental
+        # and may need cleanup before being used as a reliable evaluation loop.
         goalies_states = goalies_next_states
         strikers_states = strikers_next_states
 
