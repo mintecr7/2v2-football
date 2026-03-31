@@ -19,13 +19,17 @@ The main pieces are:
 - `CoE202.exe`: the compiled Unity simulator.
 - `CoE202_Data/`: Unity build data and ML-Agents timer metadata.
 - `main1.py`: the main training script. It also runs an evaluation block after training.
+- `smoke_test.py`: a minimal runtime smoke test for launching the Unity environment and stepping a few actions.
 - `sample_code.py`: a small environment-inspection script used to poke at observations/actions.
 - `agent.py`: action-selection wrapper around the actor model plus rollout memory.
 - `model.py`: actor and critic neural networks.
 - `memory.py`: simple rollout storage.
 - `optimizer.py`: PPO-style optimization logic.
+- `requirements-legacy.txt`: provisional dependency manifest for the runtime recovery pass.
 - `checkpoint_*.pth`: saved PyTorch weights for goalie and striker actor/critic models.
 - `unityagents-0.4.0-py3-none-any.whl`: an old wheel bundled with the project.
+- `docs/runtime-recovery.md`: the current runtime/platform recovery guide.
+- `docs/compatibility-probe.md`: the success criteria and status note for locking a working dependency baseline.
 
 
 High-Level Architecture
@@ -191,6 +195,29 @@ This repo is useful as a snapshot of the project, but it has several rough edges
 - The actor implementation is unusual: it returns `torch.sign(...)` of the action head while also building a categorical distribution from softmax logits.
 - The evaluation section in `main1.py` appears incomplete.
 - The repo contains only one git commit, so there is no development history to reconstruct intent from.
+
+
+Runtime Recovery Starting Point
+-------------------------------
+
+If you want to validate the environment before touching training code, start
+with the smoke test:
+
+- `python smoke_test.py --env-path CoE202 --steps 10`
+
+That script is intended to:
+
+- resolve the Unity environment path,
+- print behavior names and observation shapes,
+- send a few actions,
+- print rewards,
+- exit cleanly on success or with an explicit error code on failure.
+
+Important platform note:
+
+- The bundled simulator is `CoE202.exe`, so native macOS execution is blocked
+  unless you recover the original Unity project or a separate macOS build.
+- Short-term runtime validation should assume Windows access or a Windows VM.
 
 
 Practical Notes If You Want To Revive It
