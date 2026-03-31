@@ -1,0 +1,10 @@
+# Legacy runtime manifest for the repo recovery pass.
+#
+# This is intentionally not a verified lockfile yet.
+# Replace these broad entries with exact pins after the first successful
+# Windows smoke test and promote that passing combination to the baseline.
+
+numpy
+mlagents_envs
+torch
+tensorflow
